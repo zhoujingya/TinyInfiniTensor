@@ -24,8 +24,8 @@ void test_allocator_basic() {
   allocator.free(offsetB, b->getBytes());
   size_t offsetD = allocator.alloc(d->getBytes());
   // expected to be a->d->c
-  EXPECT_EQ(offsetB, offsetD);
-  ASSERT_FALSE(offsetA == 0 && offsetB == 0 && offsetC == 0 && offsetD == 0);
+  assert(offsetB == offsetD);
+  assert(offsetA != 0 || offsetB != 0 || offsetC != 0 || offsetD != 0);
   std::cout << "All allocator tests passed!" << std::endl;
 }
 
@@ -47,7 +47,7 @@ void testAllocWithEndFreeBlock() {
   size_t offsetD = allocator.alloc(d->getBytes());
   allocator.info();
   // expected to be a->b->d, with no free block between b and c
-  EXPECT_EQ(offsetC, offsetD);
+  assert(offsetC == offsetD);
 }
 
 void testGetPtr() {
@@ -66,13 +66,14 @@ void testGetPtr() {
   // multiple calls to the getPtr() function should return the same pointer
   void *ptr1 = allocator.getPtr();
   void *ptr2 = allocator.getPtr();
-  EXPECT_EQ(ptr1, ptr2);
+  assert(ptr1 == ptr2);
 }
 
 int main() {
   try {
     test_allocator_basic();
     testAllocWithEndFreeBlock();
+    testGetPtr();
     return 0;
   } catch (const std::exception &e) {
     std::cerr << "Test failed: " << e.what() << std::endl;
