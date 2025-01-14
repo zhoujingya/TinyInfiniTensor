@@ -63,25 +63,6 @@ size_t Allocator::alloc(size_t size) {
   used += size;
   peak = std::max(peak, used);
   return offset;
-  if (free_blocks.empty()) {
-    size_t offset = used;
-    used += size;
-    peak = std::max(peak, used);
-    return offset;
-  }
-  // 2. 如果free_blocks不为空，则从free_blocks中找到一个合适的block进行分配
-  for (auto it = free_blocks.begin(); it != free_blocks.end(); ++it) {
-    // 找到第一个大小大于等于size的block
-    // 判断这个地址的空间有没有被回收
-    if (it->second >= size) {
-      ptr = (char *)ptr + it->first;
-      used += size;
-      peak = std::max(peak, used);
-      return it->first;
-    }
-  }
-
-  return 0;
 }
 
 void Allocator::free(size_t addr, size_t size) {
