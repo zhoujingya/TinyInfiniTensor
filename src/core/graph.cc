@@ -143,6 +143,12 @@ namespace infini
         }
     }
 
+    // 运行时的图内存分配
+    // 1. 为所有输入tensor分配内存
+    // 2. 按拓扑顺序为算子的输出tensor分配内存
+    // 3. 获取实际分配的内存指针并绑定到tensor
+    // 4. 打印内存分配信息
+    // 图的抽象：输入，张量，算子
     void GraphObj::dataMalloc()
     {
         // topological sorting first
@@ -151,19 +157,33 @@ namespace infini
         // TODO：利用 allocator 给计算图分配内存
         // HINT: 获取分配好的内存指针后，可以调用 tensor 的 setDataBlob 函数给 tensor 绑定内存
         // =================================== 作业 ===================================
-        // 遍历所有tensor分配内存
-        for (auto tensor : tensors) {
-            // 计算tensor所需内存大小
-            size_t size = tensor->getBytes();
+        // 为每个tensor分配内存
+        std::unordered_map<int, size_t> tensorOffsets;  // 记录每个tensor的内存偏移量
 
-            // 使用allocator分配内存
-            size_t offset = allocator.alloc(size);
-
-            // 获取分配的内存指针
-            void* ptr = (void*)((uint8_t*)allocator.getPtr() + offset);
-
-            // 将内存绑定到tensor
-            tensor->setDataBlob(make_ref<BlobObj>(runtime, ptr));
+        // 1. 为所有输入tensor分配内存
+        for (auto &tensor : tensors) {
+            size_t bytes = tensor->getBytes();
+            size_t offset = allocator.alloc(bytes);
+            tensorOffsets[tensor->getFuid()] = offset;
+        }
+        // 2. 按拓扑顺序为算子的输出tensor分配内存
+        for (auto &op : ops) {
+            for (auto &output : op->getOutputs()) {
+                size_t bytes = output->getBytes();
+                size_t offset = allocator.alloc(bytes);
+                tensorOffsets[output->getFuid()] = offset;
+            }
+        }
+        // 3. 获取实际分配的内存指针并绑定到tensor
+        void* basePtr = allocator.getPtr();
+        for (auto &tensor : tensors) {
+            auto fuid = tensor->getFuid();
+            if (tensorOffsets.find(fuid) != tensorOffsets.end()) {
+                size_t offset = tensorOffsets[fuid];
+                char* tensorPtr = static_cast<char*>(basePtr) + offset;
+                auto blob = make_ref<BlobObj>(runtime, tensorPtr);
+                tensor->setDataBlob(blob);
+            }
         }
 
         allocator.info();
