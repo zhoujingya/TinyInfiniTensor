@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <numeric>
 #include <queue>
+#include <optional>
 
 namespace infini {
 
@@ -60,11 +61,11 @@ bool GraphObj::topo_sort() {
   sorted.reserve(ops.size());
   flags.reserve(ops.size());
   while (sorted.size() < ops.size()) {
-    // Any node is move to sorted in this loop.
     auto modified = false;
+    auto const &op = ops[0];
+    auto const &inputs = op->getInputs();
     for (auto const &op : ops) {
-      if (auto const &inputs = op->getInputs();
-          flags.find(op.get()) == flags.end() &&
+      if (flags.find(op.get()) == flags.end() &&
           std::all_of(inputs.begin(), inputs.end(),
                       [&flags](auto const &input) {
                         auto ptr = input->getSource().get();
@@ -114,23 +115,34 @@ void GraphObj::optimize() {
   topo_sort();
   for (auto ite = ops.begin(); ite != ops.end();) {
     auto op = *ite;
-    bool should_erase = false;
     if (op->getOpType() == OpType::Transpose) {
       auto transpose_op = as<TransposeObj>(op);
-      auto succ_op = op->getSuccessors()[0];
+      if(op->getSuccessors().empty()) {
+        ++ite;
+        continue;
+      }
+      auto successors = op->getSuccessors();
+      if (successors.empty()) {
+        ++ite;
+        continue;
+      }
+      auto succ_op = successors[0];
       // 如果后继不是transpose，则跳过
       if(succ_op->getOpType() != OpType::Transpose) {
+        ++ite;
         continue;
       }
       // 如果后继的transpose不是反向的，则跳过
       auto transpose_succ_op = as<TransposeObj>(succ_op);
-      if(!can_transpose_reverse(transpose_op->getPermute(), transpose_succ_op->getPermute()))
+      if(!can_transpose_reverse(transpose_op->getPermute(), transpose_succ_op->getPermute())) {
+        ++ite;
         continue;
+      }
       // 例如：
       //                              output1
       //                               /      \
       //                              /        \
-      //source1 --> input1-->transpose1      transpose1-->output2---->target2
+      // source1 --> input1-->transpose1      transpose1-->output2---->target2
       //                  |
       //                  |
       //                  |
@@ -142,10 +154,25 @@ void GraphObj::optimize() {
       Operator input_source = input1->getSource();
 
       auto output2 = transpose_succ_op->getOutputs()[0];
+      // 意味着只留一个输入inpu1
+      if(output2->getTargets().empty()) {
+        auto succ_it = std::find(ops.begin(), ops.end(), transpose_succ_op);
+        if (succ_it != ops.end()) {
+          ops.erase(succ_it);
+        }
+        ite = ops.erase(ite);
+        input1->removeTarget(op);
+        removeOperator(transpose_succ_op);
+        removeOperator(op);
+        // TODO: remove output1
+        removeTensor(output2);
+        continue;
+      }
+
       Operator target2  = output2->getTargets()[0];
       target2->removePredecessors(transpose_succ_op);
       output2->removeTarget(target2);
-      if(input_source != nullptr){
+      if(input_source != nullptr) {
         input_source->removeSuccessors(transpose_succ_op);
         input_source->addSuccessors(target2);
       }
@@ -155,7 +182,10 @@ void GraphObj::optimize() {
       removeTensor(transpose_succ_op->getOutputs()[0]);
       input1->addTarget(target2);
       target2->addPredecessors(input_source);
+      ite = ops.erase(ite);
+      continue;
     }
+    ++ite;
   }
 }
 
@@ -235,7 +265,9 @@ void GraphObj::dataMalloc() {
 }
 
 Tensor GraphObj::addTensor(Shape dim, DataType dtype) {
-  return tensors.emplace_back(make_ref<TensorObj>(dim, dtype, runtime));
+  auto tensor = make_ref<TensorObj>(dim, dtype, runtime);
+  tensors.push_back(tensor);
+  return tensor;
 }
 
 Tensor GraphObj::addTensor(const Tensor &tensor) {
