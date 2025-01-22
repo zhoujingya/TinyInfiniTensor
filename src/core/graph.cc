@@ -3,8 +3,8 @@
 #include "operators/transpose.h"
 #include <algorithm>
 #include <numeric>
-#include <queue>
 #include <optional>
+#include <queue>
 
 namespace infini {
 
@@ -84,23 +84,6 @@ bool GraphObj::topo_sort() {
   return this->sorted = true;
 }
 
-static bool can_transpose_reverse(Shape perm1, Shape perm2) {
-  if (perm1.size() != perm2.size()) {
-    return false;
-  }
-  for (int i = 0; i < perm1.size(); i++) {
-    if (perm1[perm2[i]] != i) {
-      return false;
-    }
-  }
-  return true;
-}
-
-// static bool IsSwapLastDim(Shape permute) {
-//     auto size = permute.size();
-//     return permute[size - 1] == static_cast<int>(size - 2) && permute[size - 2] == static_cast<int>(size - 1);
-// }
-
 void GraphObj::optimize() {
   // =================================== 作业
   // ===================================
@@ -112,81 +95,125 @@ void GraphObj::optimize() {
   // 合并算子（例如，矩阵乘算子中含有属性transA、transB，如果其输入存在transpose，且对最后两个维度做交换，就可以将transpose融入到矩阵乘算子的属性中去）
   // =================================== 作业
   // ===================================
-  topo_sort();
-  for (auto ite = ops.begin(); ite != ops.end();) {
-    auto op = *ite;
-    if (op->getOpType() == OpType::Transpose) {
-      auto transpose_op = as<TransposeObj>(op);
-      if(op->getSuccessors().empty()) {
-        ++ite;
-        continue;
-      }
-      auto successors = op->getSuccessors();
-      if (successors.empty()) {
-        ++ite;
-        continue;
-      }
-      auto succ_op = successors[0];
-      // 如果后继不是transpose，则跳过
-      if(succ_op->getOpType() != OpType::Transpose) {
-        ++ite;
-        continue;
-      }
-      // 如果后继的transpose不是反向的，则跳过
-      auto transpose_succ_op = as<TransposeObj>(succ_op);
-      if(!can_transpose_reverse(transpose_op->getPermute(), transpose_succ_op->getPermute())) {
-        ++ite;
-        continue;
-      }
-      // 例如：
-      //                              output1
-      //                               /      \
-      //                              /        \
-      // source1 --> input1-->transpose1      transpose1-->output2---->target2
-      //                  |
-      //                  |
-      //                  |
-      //  source1 --->input1 ---->target2
-      //
-      // 开始合并:
-      auto input1 = op->getInputs()[0];
-      input1->removeTarget(op);
-      Operator input_source = input1->getSource();
+  // 如果拓扑排序失败,直接返回
+  if (!this->topo_sort())
+    return;
+  bool optimized;
+  do {
+    optimized = false;
 
-      auto output2 = transpose_succ_op->getOutputs()[0];
-      // 意味着只留一个输入inpu1
-      if(output2->getTargets().empty()) {
-        auto succ_it = std::find(ops.begin(), ops.end(), transpose_succ_op);
-        if (succ_it != ops.end()) {
-          ops.erase(succ_it);
+    // 遍历所有算子
+    for (size_t i = 0; i < ops.size(); ++i) {
+      auto op = ops[i];
+      // 处理Transpose算子
+      if (op->getOpType() == OpType::Transpose) {
+        auto opd = as<TransposeObj>(op);
+        auto input = op->getInputs(0);
+        auto prevOp = input->getSource();
+
+        // 检查是否有两个相邻的Transpose算子
+        if (prevOp && prevOp->getOpType() == OpType::Transpose &&
+            input->getTargets().size() == 1) {
+          auto prevOpd = as<TransposeObj>(prevOp);
+          auto prevInput = prevOp->getInputs(0);
+
+          // 合并两个Transpose的置换操作
+          auto perm = opd->getPermute();
+          // 检查两个Transpose操作组合后是否为恒等变换
+          // 通过将两个置换操作组合，并检查结果是否为[0,1,2,...]来判断
+          bool isIdentity = true;
+          for (size_t j = 0; j < perm.size(); ++j) {
+            // 组合两个置换操作:先做prevOpd的置换,再做当前op的置换
+            perm[j] = prevOpd->getPermute()[perm[j]];
+            // 如果最终结果中任何位置不等于其下标,说明不是恒等变换
+            if (perm[j] != int(j)) {
+              isIdentity = false;
+            }
+          }
+
+          // 更新连接关系
+          prevInput->removeTarget(prevOp);
+          if (isIdentity) {
+            // 如果合并后是恒等变换,直接删除两个Transpose
+            for (auto succ : op->getSuccessors()) {
+              succ->replaceInput(op->getOutput(), prevInput);
+              prevInput->addTarget(succ);
+            }
+            this->removeTensor(op->getOutput());
+          }
+
+          // 清理旧的连接关系
+          for (auto pred : prevOp->getPredecessors())
+            pred->removeSuccessors(prevOp);
+          for (auto succ : op->getSuccessors())
+            succ->removePredecessors(op);
+
+          // 删除旧的Tensor和Operator
+          removeTensor(input);
+          removeOperator(op);
+          removeOperator(prevOp);
+          optimized = true;
+          i -= 2;
+          break;
         }
-        ite = ops.erase(ite);
-        input1->removeTarget(op);
-        removeOperator(transpose_succ_op);
-        removeOperator(op);
-        // TODO: remove output1
-        removeTensor(output2);
-        continue;
       }
 
-      Operator target2  = output2->getTargets()[0];
-      target2->removePredecessors(transpose_succ_op);
-      output2->removeTarget(target2);
-      if(input_source != nullptr) {
-        input_source->removeSuccessors(transpose_succ_op);
-        input_source->addSuccessors(target2);
+      // 处理MatMul算子
+      if (op->getOpType() == OpType::MatMul) {
+        auto matmulOp = as<MatmulObj>(op);
+
+        // 检查MatMul的输入是否有Transpose
+        for (int inputIdx = 0; inputIdx < 2; ++inputIdx) {
+          auto input = op->getInputs(inputIdx);
+          auto transposeOp = input->getSource();
+
+          // 如果输入来自Transpose且只有这一个目标
+          if (transposeOp && transposeOp->getOpType() == OpType::Transpose &&
+              input->getTargets().size() == 1) {
+            auto transposeObj =
+                as<TransposeObj>(transposeOp);
+            auto perm = transposeObj->getPermute();
+
+            // 检查是否只交换了最后两个维度
+            bool isLastTwoSwapped =
+                (perm.size() > 1 &&
+                 perm[perm.size() - 2] == int(perm.size() - 1) &&
+                 perm[perm.size() - 1] == int(perm.size() - 2));
+            bool isIdentityElsewhere = true;
+            for (size_t j = 0; j < perm.size() - 2; ++j) {
+              if (perm[j] != int(j)) {
+                isIdentityElsewhere = false;
+                break;
+              }
+            }
+            if (!isLastTwoSwapped || !isIdentityElsewhere) {
+              continue;
+            }
+
+            // 将Transpose融入到MatMul的属性中
+            if (inputIdx == 0) {
+              matmulOp->setTransA(!matmulOp->getTransA());
+            } else {
+              matmulOp->setTransB(!matmulOp->getTransB());
+            }
+
+            // 更新连接关系
+            auto prevInput = transposeOp->getInputs(0);
+            prevInput->removeTarget(transposeOp);
+            prevInput->addTarget(matmulOp);
+            matmulOp->replaceInput(input, prevInput);
+            matmulOp->removePredecessors(transposeOp);
+
+            // 删除Transpose
+            this->removeTensor(input);
+            this->removeOperator(transposeOp);
+            optimized = true;
+            break;
+          }
+        }
       }
-      removeOperator(transpose_succ_op);
-      removeOperator(op);
-      removeTensor(output2);
-      removeTensor(transpose_succ_op->getOutputs()[0]);
-      input1->addTarget(target2);
-      target2->addPredecessors(input_source);
-      ite = ops.erase(ite);
-      continue;
     }
-    ++ite;
-  }
+  } while (optimized); // 如果有优化发生就继续循环
 }
 
 Tensor GraphObj::getTensor(int fuid) const {
